@@ -33,72 +33,81 @@ class BookingController extends Controller
     /**
      * Store a newly created booking in storage.
      */
-    public function store(Request $request)
-    {
-        try {
-            // Validate incoming request
-            $validated = $request->validate([
-                'car_id' => 'required|integer|exists:cars,id',
-                'user_id' => 'required|integer|exists:users,id',
-                'pickup_date' => 'required|date_format:Y-m-d H:i:s|after:now',
-                'return_date' => 'required|date_format:Y-m-d H:i:s|after:pickup_date',
-                'status' => 'nullable|in:pending,confirmed,completed,cancelled',
-                'price' => 'required|numeric|min:0'
-            ]);
-
-            // Check if car exists and is available
-            $car = Car::find($validated['car_id']);
-            if (!$car || !$car->is_available) {
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'Selected car is not available for booking'
-                ], 422);
-            }
-
-            // Check for existing bookings on the same dates
-            $existingBooking = Bookings::where('car_id', $validated['car_id'])
-                ->where(function ($query) use ($validated) {
-                    $query->whereBetween('pickup_date', [$validated['pickup_date'], $validated['return_date']])
-                        ->orWhereBetween('return_date', [$validated['pickup_date'], $validated['return_date']])
-                        ->orWhere(function ($q) use ($validated) {
-                            $q->where('pickup_date', '<=', $validated['pickup_date'])
-                                ->where('return_date', '>=', $validated['return_date']);
-                        });
-                })
-                ->where('status', '!=', 'cancelled')
-                ->exists();
-
-            if ($existingBooking) {
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'Car is already booked for the selected dates'
-                ], 409);
-            }
-
-            // Create the booking
-            $booking = Bookings::create($validated);
-            $booking->load(['car', 'user']);
-
-            return response()->json([
-                'status' => 'success',
-                'message' => 'Booking created successfully',
-                'data' => $booking
-            ], 201);
-        } catch (\Illuminate\Validation\ValidationException $e) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Validation failed',
-                'errors' => $e->errors()
-            ], 422);
-        } catch (\Exception $e) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Failed to create booking',
-                'error' => $e->getMessage()
-            ], 500);
+public function store(Request $request)
+{
+    try {
+        // 1. Automatically grab the logged-in user's ID via the Sanctum token
+        if ($request->user()) {
+            $request->merge(['user_id' => $request->user()->id]);
         }
-    }
 
+        // 2. Validate incoming requests (Using flexible 'date' formats instead of strict regex)
+        $validated = $request->validate([
+            'car_id'      => 'required|integer|exists:cars,id',
+            'user_id'     => 'required|integer|exists:users,id', // This will now pass!
+            'pickup_date' => 'required|date|after_or_equal:today',
+            'return_date' => 'required|date|after:pickup_date',
+            'status'      => 'nullable|in:pending,confirmed,completed,cancelled',
+            'price'       => 'required|numeric|min:0'
+        ]);
+
+        // Clean up date formatting for database insertion consistency
+        $validated['pickup_date'] = date('Y-m-d H:i:s', strtotime($validated['pickup_date']));
+        $validated['return_date'] = date('Y-m-d H:i:s', strtotime($validated['return_date']));
+
+        // Check if car exists and is available
+        $car = Car::find($validated['car_id']);
+        if (!$car || !$car->is_available) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Selected car is not available for booking'
+            ], 422);
+        }
+
+        // Overlapping booking logic check
+        $existingBooking = Bookings::where('car_id', $validated['car_id'])
+            ->where('status', '!=', 'cancelled')
+            ->where(function ($query) use ($validated) {
+                $query->whereBetween('pickup_date', [$validated['pickup_date'], $validated['return_date']])
+                    ->orWhereBetween('return_date', [$validated['pickup_date'], $validated['return_date']])
+                    ->orWhere(function ($q) use ($validated) {
+                        $q->where('pickup_date', '<=', $validated['pickup_date'])
+                            ->where('return_date', '>=', $validated['return_date']);
+                    });
+            })
+            ->exists();
+
+        if ($existingBooking) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Car is already booked for the selected dates'
+            ], 409);
+        }
+
+        // Create the booking record safely
+        $booking = Bookings::create($validated);
+        $booking->load(['car', 'user']);
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Booking created successfully',
+            'data' => $booking
+        ], 201);
+
+    } catch (\Illuminate\Validation\ValidationException $e) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Validation failed',
+            'errors' => $e->errors()
+        ], 422);
+    } catch (\Exception $e) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Failed to create booking',
+            'error' => $e->getMessage()
+        ], 500);
+    }
+}
     /**
      * Display the specified booking.
      */
